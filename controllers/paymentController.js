@@ -1,3 +1,54 @@
+// Step 3: Query transaction event
+exports.getTransactionEvent = async (req, res) => {
+  try {
+    const { ref, kind, client, status } = req.query;
+    if (!ref || !kind || !client || !status) {
+      return res.status(400).json({ error: 'ref, kind, client, and status are required query parameters' });
+    }
+
+    // Get credentials from env
+    const client_id = process.env.PAYPACK_CLIENT_ID;
+    const client_secret = process.env.PAYPACK_CLIENT_SECRET;
+    if (!client_id || !client_secret) {
+      return res.status(500).json({ error: 'Paypack credentials not set in environment' });
+    }
+
+    // Step 1: Get access token
+    const authUrl = 'https://payments.paypack.rw/api/auth/agents/authorize';
+    let access_token;
+    try {
+      const authRes = await axios.post(authUrl, { client_id, client_secret }, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000
+      });
+      access_token = authRes.data && authRes.data.access;
+      if (!access_token) {
+        return res.status(502).json({ error: 'Failed to obtain access token from Paypack' });
+      }
+    } catch (authErr) {
+      if (authErr.response) {
+        return res.status(authErr.response.status || 502).json(authErr.response.data || { error: 'Auth error from payment provider' });
+      }
+      return res.status(500).json({ error: authErr.message });
+    }
+
+    // Step 2: Query transaction event
+    const url = `https://payments.paypack.rw/api/events/transactions?ref=${encodeURIComponent(ref)}&kind=${encodeURIComponent(kind)}&client=${encodeURIComponent(client)}&status=${encodeURIComponent(status)}`;
+    const response = await axios.get(url, {
+      headers: {
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${access_token}`
+      },
+      timeout: 10000
+    });
+    return res.status(response.status).json(response.data);
+  } catch (err) {
+    if (err.response) {
+      return res.status(err.response.status || 502).json(err.response.data || { error: 'Bad response from payment provider' });
+    }
+    return res.status(500).json({ error: err.message });
+  }
+};
 // Step 2: Initiate payment
 exports.initiatePayment = async (req, res) => {
   try {

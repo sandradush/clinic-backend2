@@ -6,6 +6,53 @@ const paymentController = require('../controllers/paymentController');
 
 /**
  * @swagger
+ * /api/payment/event:
+ *   get:
+ *     summary: Get transaction event from Paypack
+ *     description: Queries Paypack for transaction event details using ref, kind, client, and status. Credentials are loaded from environment.
+ *     tags:
+ *       - Payment
+ *     parameters:
+ *       - in: query
+ *         name: ref
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Transaction reference
+ *       - in: query
+ *         name: kind
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Transaction kind (e.g. CASHIN)
+ *       - in: query
+ *         name: client
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Client phone number
+ *       - in: query
+ *         name: status
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Transaction status (e.g. pending)
+ *     responses:
+ *       200:
+ *         description: Transaction event details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Bad request
+ *       502:
+ *         description: Bad response from payment provider
+ */
+router.get('/event', paymentController.getTransactionEvent);
+
+/**
+ * @swagger
  * /api/payment/initiate:
  *   post:
  *     summary: Initiate a payment (cashin)
