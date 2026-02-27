@@ -1,7 +1,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { body, validationResult } = require('express-validator');
+const { body, validationResult, param } = require('express-validator');
 const paymentController = require('../controllers/paymentController');
 
 /**
@@ -72,6 +72,9 @@ router.get('/event', paymentController.getTransactionEvent);
  *               number:
  *                 type: string
  *                 example: '078xxxxxxx'
+ *               patient_id:
+ *                 type: string
+ *                 example: 'patient_12345'
  *     responses:
  *       200:
  *         description: Payment initiated
@@ -95,7 +98,18 @@ router.get('/event', paymentController.getTransactionEvent);
  *       502:
  *         description: Bad response from payment provider
  */
-router.post('/initiate', paymentController.initiatePayment);
+const validateInitiate = [
+	body('amount').isNumeric().withMessage('amount must be a number'),
+	body('number').isString().notEmpty().withMessage('number is required'),
+	body('patient_id').optional().isString().withMessage('patient_id must be a string'),
+	(req, res, next) => {
+		const errors = validationResult(req);
+		if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+		next();
+	}
+];
+
+router.post('/initiate', validateInitiate, paymentController.initiatePayment);
 
 /**
  * POST /api/payment/auth
@@ -112,5 +126,60 @@ const validateAuth = [
 ];
 
 router.post('/auth', validateAuth, paymentController.authorize);
+
+/**
+ * @swagger
+ * /api/payment/{id}/status:
+ *   put:
+ *     summary: Update payment status
+ *     description: Update the status of a payment record and optionally set the provider reference.
+ *     tags:
+ *       - Payment
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Payment record ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 example: completed
+ *               provider_ref:
+ *                 type: string
+ *                 example: PAYPACK_REF_ABC
+ *     responses:
+ *       200:
+ *         description: Updated payment object
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *       400:
+ *         description: Bad request
+ *       404:
+ *         description: Payment not found
+ *       500:
+ *         description: Server error
+ */
+const validateStatus = [
+	param('id').notEmpty().withMessage('id is required'),
+	body('status').isString().notEmpty().withMessage('status is required'),
+	body('provider_ref').optional().isString().withMessage('provider_ref must be a string'),
+	(req, res, next) => {
+		const errors = validationResult(req);
+		if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+		next();
+	}
+];
+
+router.put('/:id/status', validateStatus, paymentController.updatePaymentStatus);
 
 module.exports = router;

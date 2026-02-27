@@ -1,3 +1,6 @@
+const axios = require('axios');
+const pool = require('../config/db');
+
 // Step 3: Query transaction event
 exports.getTransactionEvent = async (req, res) => {
   try {
@@ -52,7 +55,7 @@ exports.getTransactionEvent = async (req, res) => {
 // Step 2: Initiate payment
 exports.initiatePayment = async (req, res) => {
   try {
-    const { amount, number } = req.body || {};
+    const { amount, number, patient_id } = req.body || {};
     if (!amount || !number) {
       return res.status(400).json({ error: 'amount and number are required' });
     }
@@ -85,9 +88,12 @@ exports.initiatePayment = async (req, res) => {
 
     // Step 2: Initiate payment
     const url = 'https://payments.paypack.rw/api/transactions/cashin';
+    const payload = { amount, number };
+    if (patient_id) payload.patient_id = patient_id;
+
     const response = await axios.post(
       url,
-      { amount, number },
+      payload,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -97,7 +103,32 @@ exports.initiatePayment = async (req, res) => {
         timeout: 10000
       }
     );
-    return res.status(response.status).json(response.data);
+    // Include patient_id in the response that we return to the client for traceability
+    const providerData = response.data || {};
+    const out = Object.assign({}, providerData);
+    if (patient_id) out.patient_id = patient_id;
+
+    // Persist the initiated payment to the database
+    try {
+      const statusFromProvider = providerData.status || 'pending';
+      const ref = providerData.ref || providerData.reference || null;
+      const kind = providerData.kind || null;
+      const provider_ref = ref;
+      const createdAt = providerData.created_at || null;
+
+      const insertQuery = `INSERT INTO payments
+        (amount, number, patient_id, status, provider_ref, provider_kind, provider_response, ref, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        RETURNING *`;
+      const insertValues = [amount, number, patient_id || null, statusFromProvider, provider_ref, kind, JSON.stringify(providerData), ref || null, createdAt];
+      const insertRes = await pool.query(insertQuery, insertValues);
+      const saved = insertRes.rows && insertRes.rows[0] ? insertRes.rows[0] : null;
+      // Return the provider response merged with saved DB row for traceability
+      return res.status(response.status).json({ provider: out, payment: saved });
+    } catch (dbErr) {
+      // If DB insert fails, return 500 with provider response and DB error
+      return res.status(500).json({ error: 'Failed to persist payment', details: dbErr.message, provider: out });
+    }
   } catch (err) {
     if (err.response) {
       return res.status(err.response.status || 502).json(err.response.data || { error: 'Bad response from payment provider' });
@@ -105,8 +136,6 @@ exports.initiatePayment = async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 };
-const axios = require('axios');
-
 exports.authorize = async (req, res) => {
   try {
     const { client_id, client_secret } = req.body || {};
@@ -125,6 +154,24 @@ exports.authorize = async (req, res) => {
     if (err.response) {
       return res.status(err.response.status || 502).json(err.response.data || { error: 'Bad response from payment provider' });
     }
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// Update payment status in the database
+exports.updatePaymentStatus = async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    const { status, provider_ref } = req.body || {};
+    if (!id) return res.status(400).json({ error: 'payment id is required as URL param' });
+    if (!status) return res.status(400).json({ error: 'status is required in request body' });
+
+    const query = `UPDATE payments SET status = $2, provider_ref = COALESCE($3, provider_ref), updated_at = NOW() WHERE id = $1 RETURNING *`;
+    const values = [id, status, provider_ref || null];
+    const result = await pool.query(query, values);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Payment not found' });
+    return res.json(result.rows[0]);
+  } catch (err) {
     return res.status(500).json({ error: err.message });
   }
 };
