@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { body, validationResult, param } = require('express-validator');
 const paymentController = require('../controllers/paymentController');
+const requireAdmin = require('../middlewares/requireAdmin');
 
 /**
  * @swagger
@@ -75,6 +76,9 @@ router.get('/event', paymentController.getTransactionEvent);
  *               patient_id:
  *                 type: string
  *                 example: 'patient_12345'
+ *               appointment_id:
+ *                 type: string
+ *                 example: 'appt_98765'
  *     responses:
  *       200:
  *         description: Payment initiated
@@ -181,5 +185,78 @@ const validateStatus = [
 ];
 
 router.put('/:id/status', validateStatus, paymentController.updatePaymentStatus);
+
+/**
+ * GET /api/payments/:id
+ * Debug endpoint to fetch payment by id
+ */
+router.get('/:id', async (req, res) => {
+	try {
+		const { id } = req.params || {};
+		if (!id) return res.status(400).json({ error: 'id is required' });
+		const result = await require('../config/db').query('SELECT * FROM payments WHERE id = $1', [id]);
+		if (result.rowCount === 0) return res.status(404).json({ error: 'Payment not found' });
+		res.json(result.rows[0]);
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+/**
+ * GET /api/payments
+ * Admin: list payments with optional filters
+ */
+// NOTE: Admin payments listing endpoint removed.
+
+/**
+ * @swagger
+ * /api/payments/{paymentId}/approve:
+ *   patch:
+ *     summary: Approve a payment (admin only)
+ *     description: Set payment.status='approved', update related appointment.payment_status, record admin_id and timestamp.
+ *     tags:
+ *       - Payment
+ *     parameters:
+ *       - in: path
+ *         name: paymentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Payment ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               admin_id:
+ *                 type: string
+ *               note:
+ *                 type: string
+ *             required:
+ *               - admin_id
+ *     responses:
+ *       200:
+ *         description: Approval result
+ *       400:
+ *         description: Bad request
+ *       404:
+ *         description: Payment not found
+ *       500:
+ *         description: Server error
+ */
+const validateApprove = [
+	param('paymentId').notEmpty().withMessage('paymentId is required'),
+	body('note').optional().isString().withMessage('note must be a string'),
+	(req, res, next) => {
+		const errors = validationResult(req);
+		if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+		next();
+	}
+];
+
+// Admin middleware enforces role; it will set req.admin_id from req.user or headers/body
+router.patch('/:paymentId/approve', requireAdmin, validateApprove, paymentController.approvePayment);
 
 module.exports = router;

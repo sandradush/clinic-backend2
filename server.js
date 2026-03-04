@@ -4,12 +4,16 @@ const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
 const cors = require('cors');
 const pool = require('./config/db');
+const http = require('http');
+const socketLib = require('./lib/socket');
 
 // Logging
 const morgan = require('morgan');
 
 // Routes
 const paymentRouter = require('./routes/payment');
+const notificationsRouter = require('./routes/notifications');
+const appointmentsRouter = require('./routes/appointments');
 
 const app = express();
 
@@ -61,6 +65,8 @@ const swaggerOptions = {
       version: '1.0.0',
       description: 'API for clinic management system',
     },
+    // No security schemes included here so Swagger UI won't show an
+    // Authorize (padlock) control for the spec.
     // Only include static servers when explicitly provided via env.
     ...(swaggerServers.length ? { servers: swaggerServers } : {}),
   },
@@ -149,8 +155,15 @@ app.get('/api/health', async (req, res) => {
  * Proxies client_id and client_secret to PayPack and returns tokens
  */
 app.use('/api/payment', paymentRouter);
+app.use('/api/payments', paymentRouter);
+app.use('/api/notifications', notificationsRouter);
+app.use('/api/appointments', appointmentsRouter);
 
-app.listen(PORT, HOST, () => {
+// Create an HTTP server and attach socket.io
+const server = http.createServer(app);
+socketLib.init(server, { corsOrigin: true });
+
+server.listen(PORT, HOST, () => {
   console.log(`Server running on http://${HOST}:${PORT}`);
   console.log(`Swagger UI available at http://${HOST}:${PORT}/api-docs`);
 });

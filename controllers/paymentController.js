@@ -55,7 +55,7 @@ exports.getTransactionEvent = async (req, res) => {
 // Step 2: Initiate payment
 exports.initiatePayment = async (req, res) => {
   try {
-    const { amount, number, patient_id } = req.body || {};
+    const { amount, number, patient_id, appointment_id } = req.body || {};
     if (!amount || !number) {
       return res.status(400).json({ error: 'amount and number are required' });
     }
@@ -90,6 +90,7 @@ exports.initiatePayment = async (req, res) => {
     const url = 'https://payments.paypack.rw/api/transactions/cashin';
     const payload = { amount, number };
     if (patient_id) payload.patient_id = patient_id;
+    if (appointment_id) payload.appointment_id = appointment_id;
 
     const response = await axios.post(
       url,
@@ -110,6 +111,8 @@ exports.initiatePayment = async (req, res) => {
 
     // Persist the initiated payment to the database
     try {
+      // Ensure payments table has appointment_id column
+      await pool.query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS appointment_id TEXT");
       const statusFromProvider = providerData.status || 'pending';
       const ref = providerData.ref || providerData.reference || null;
       const kind = providerData.kind || null;
@@ -117,10 +120,10 @@ exports.initiatePayment = async (req, res) => {
       const createdAt = providerData.created_at || null;
 
       const insertQuery = `INSERT INTO payments
-        (amount, number, patient_id, status, provider_ref, provider_kind, provider_response, ref, created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        (amount, number, patient_id, appointment_id, status, provider_ref, provider_kind, provider_response, ref, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
         RETURNING *`;
-      const insertValues = [amount, number, patient_id || null, statusFromProvider, provider_ref, kind, JSON.stringify(providerData), ref || null, createdAt];
+      const insertValues = [amount, number, patient_id || null, appointment_id || null, statusFromProvider, provider_ref, kind, JSON.stringify(providerData), ref || null, createdAt];
       const insertRes = await pool.query(insertQuery, insertValues);
       const saved = insertRes.rows && insertRes.rows[0] ? insertRes.rows[0] : null;
       // Return the provider response merged with saved DB row for traceability
@@ -173,5 +176,129 @@ exports.updatePaymentStatus = async (req, res) => {
     return res.json(result.rows[0]);
   } catch (err) {
     return res.status(500).json({ error: err.message });
+  }
+};
+
+// Admin payments listing removed — use other admin tools or queries as needed.
+
+// Get payments for a patient
+// (removed) getPatientPayments endpoint - route deleted
+
+// Add a payment for a patient if not already present
+exports.addPatientPayment = async (req, res) => {
+  try {
+    const patientId = req.params.id;
+    const { amount, number, provider_ref, ref } = req.body || {};
+    if (!patientId) return res.status(400).json({ error: 'patient id is required' });
+    if (!amount || !number) return res.status(400).json({ error: 'amount and number are required' });
+
+    // Check for existing by provider_ref/ref first
+    if (provider_ref || ref) {
+      const checkQ = `SELECT * FROM payments WHERE (provider_ref = $1 OR ref = $2) AND patient_id = $3 LIMIT 1`;
+      const chk = await pool.query(checkQ, [provider_ref || null, ref || null, patientId]);
+      if (chk.rowCount > 0) return res.json({ ok: true, existing: chk.rows[0] });
+    }
+
+    // Fallback: avoid duplicates by matching amount+number+patient within last 5 minutes
+    const dupQ = `SELECT * FROM payments WHERE patient_id = $1 AND amount = $2 AND number = $3 AND created_at >= NOW() - INTERVAL '5 minutes' LIMIT 1`;
+    const dup = await pool.query(dupQ, [patientId, amount, number]);
+    if (dup.rowCount > 0) return res.json({ ok: true, existing: dup.rows[0] });
+
+    const insertQ = `INSERT INTO payments (amount, number, patient_id, status, provider_ref, ref, created_at) VALUES ($1,$2,$3,$4,$5,$6,NOW()) RETURNING *`;
+    const vals = [amount, number, patientId, 'pending', provider_ref || null, ref || null];
+    const ins = await pool.query(insertQ, vals);
+    return res.json({ ok: true, payment: ins.rows[0] });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+// Admin approves a payment and updates related appointment(s)
+exports.approvePayment = async (req, res) => {
+  const { paymentId } = req.params || {};
+  const { note } = req.body || {};
+  // admin id should be provided by requireAdmin middleware
+  const admin_id = req.admin_id;
+  if (!paymentId) return res.status(400).json({ error: 'paymentId param is required' });
+  if (!admin_id) return res.status(403).json({ error: 'admin identity not available' });
+
+  const client = await pool.connect();
+  try {
+    console.log('approvePayment called for paymentId=', paymentId, 'admin_id=', admin_id);
+    await client.query('BEGIN');
+
+    // Ensure columns exist to record approval info (safe to run repeatedly)
+    await client.query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS approved_by TEXT");
+    await client.query("ALTER TABLE payments ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ");
+    await client.query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_status TEXT");
+    await client.query("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_approved_at TIMESTAMPTZ");
+
+    // Update payments
+    const updatePaymentQ = `UPDATE payments SET status = $2, approved_by = $3, approved_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`;
+    const paymentRes = await client.query(updatePaymentQ, [paymentId, 'approved', admin_id]);
+    console.log('payment update result rowCount=', paymentRes.rowCount);
+    if (paymentRes.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+    const payment = paymentRes.rows[0];
+
+    // Update related appointment(s) by payment_id if that column exists
+    let appointment = null;
+    try {
+      const colCheck = await client.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'appointments' AND column_name = 'payment_id' LIMIT 1`
+      );
+      if (colCheck.rowCount > 0) {
+        const updateAppQ = `UPDATE appointments SET payment_status = $2, payment_approved_at = NOW() WHERE payment_id = $1 RETURNING *`;
+        const appRes = await client.query(updateAppQ, [paymentId, 'approved']);
+        appointment = appRes.rows && appRes.rows[0] ? appRes.rows[0] : null;
+      }
+    } catch (appErr) {
+      // If appointments table or column doesn't exist or update fails, continue without blocking approval
+      appointment = null;
+    }
+
+    // If an appointment was updated, create a notification for the patient
+    try {
+      if (appointment) {
+        const toUserId = appointment.patient_id || appointment.user_id || payment.patient_id || null;
+        if (toUserId) {
+          const noteText = note || 'Your payment was approved and appointment is confirmed.';
+          const notifQ = `INSERT INTO notifications (to_user_id, title, message, meta, read, created_at)
+            VALUES ($1,$2,$3,$4,false,NOW()) RETURNING *`;
+          const notifVals = [toUserId, 'Payment Approved', noteText, JSON.stringify({ payment_id: paymentId })];
+          const notifRes = await client.query(notifQ, notifVals);
+          const notifSaved = notifRes.rows[0];
+          try {
+            const socketLib = require('../lib/socket');
+            socketLib.emitToUser(toUserId, 'notification', notifSaved);
+          } catch (emitErr) {
+            console.warn('emit notification error', emitErr.message);
+          }
+        }
+      }
+    } catch (notifErr) {
+      // log and continue
+      console.warn('failed to create/emit appointment notification', notifErr.message);
+    }
+
+    // Optionally record admin note in a simple approvals table (create if not exists)
+    await client.query(`CREATE TABLE IF NOT EXISTS payment_approvals (
+      id BIGSERIAL PRIMARY KEY,
+      payment_id BIGINT NOT NULL,
+      admin_id TEXT NOT NULL,
+      note TEXT,
+      created_at TIMESTAMPTZ DEFAULT now()
+    )`);
+    await client.query('INSERT INTO payment_approvals(payment_id, admin_id, note) VALUES ($1,$2,$3)', [paymentId, admin_id, note || null]);
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, payment, appointment });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    return res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 };
